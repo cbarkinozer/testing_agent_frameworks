@@ -1,1 +1,7 @@
 llamaindex
+saol
+__pycache__
+*.pkl
+log.txt
+volumes/*
+.env
