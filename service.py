@@ -4,24 +4,39 @@ from docx import Document
 from fastapi import UploadFile
 from user import User
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import OpenAI
 from langchain_openai import AzureOpenAI
 from langchain_groq import ChatGroq
+from langchain_community.vectorstores import Milvus
+from pymilvus import Collection,connections
 import pickle
 from datetime import datetime
 import io
 from dotenv import load_dotenv
 
+
 USER_STORE = {}
 
+is_loaded = load_dotenv()
+
+# Milvus connection parameters
+CONNECTION_URI = os.getenv("CONNECTION_URI")
+connections.connect(uri=CONNECTION_URI)
+
+
+async def upload_vectordb(user: User, files: list[UploadFile]) -> tuple[str, int]:
+    text = await _extract_text_from_document(files)
+    chunks = await _chunk_text(text)
+    await _create_embeddings_and_save_vectordb(user, chunks)
+    return "Document is uploaded successfully.", 200
 
 async def upload_documents(user: User, files: list[UploadFile]) -> tuple[str, int]:
     text = await _extract_text_from_document(files)
     chunks = await _chunk_text(text)
-    await _create_embeddings_and_save(user, chunks)
+    await _create_embeddings_and_save_local(user, chunks)
     return "Document is uploaded successfully.", 200
 
 
@@ -57,10 +72,27 @@ async def _chunk_text(text: str) -> list[str]:
     return chunks
 
 
-async def _create_embeddings_and_save(user: User, chunks: any) -> FAISS:
+async def _create_embeddings_and_save_vectordb(user: User, chunks: any) -> Collection:
+    embedding_model = HuggingFaceEmbeddings(model_name=user.embedder)
+    pkl_name = os.path.join("admin.pkl")
+    vector_store = Milvus.from_texts(
+        texts=chunks,
+        embedding=embedding_model,
+        metadatas=[{"source": f"{pkl_name}:{i}"} for i in range(len(chunks))],
+        connection_args={
+            "uri": CONNECTION_URI,
+        },
+        drop_old=True,
+    )
+    with open(pkl_name, "wb") as f:
+        pickle.dump(vector_store, f)
+    return vector_store
+
+
+async def _create_embeddings_and_save_local(user: User, chunks: any) -> FAISS:
     embeddings = HuggingFaceEmbeddings(model_name=user.embedder)
     pkl_name = os.path.join(user.username + ".pkl")
-    vector_store = FAISS.from_texts(chunks, embeddings, metadatas=[{"source": f"{pkl_name}:{i}"} for i in range(len(chunks))])
+    vector_store = FAISS.from_texts(texts=chunks, embedding=embeddings, metadatas=[{"source": f"{pkl_name}:{i}"} for i in range(len(chunks))])
     with open(pkl_name, "wb") as f:
         pickle.dump(vector_store, f)
     return vector_store
@@ -127,57 +159,65 @@ async def _get_saved_user(user: User) -> User:
         return user
 
 
-async def _rag(user: User, question: str, api_key: str) -> tuple[str, int]:
-    vector_store = await _get_vector_file(user.username)
-    if vector_store is None:
-        return "Document not found.", 400
+async def _rag(user: User, question: str, api_key:str = None) -> tuple[str, int]:
     
-    if api_key is not None:
-        os.environ["GOOGLE_API_KEY"] = api_key
-    else:
-        is_loaded = load_dotenv()
-        if is_loaded == False:
-            return "API key not found.", 400
+    if is_loaded == False:
+        return "Environment file is not found.", 400
     
-    llm = await _get_llm(model_name=user.llm)
-    docs = vector_store.similarity_search(question)
-    print(docs)
-    retrieved_chunks = docs[0].page_content + docs[1].page_content + docs[2].page_content
-    system_message="Figure out the answer of the question by the given information pieces. ALWAYS answer with the language of the question."
-    prompt = system_message + "Question: " + question + " Context: " + retrieved_chunks
+    llm = await _get_llm(model_name=user.llm, api_key=api_key)
+
+    if llm is None:
+        return "API key not found.", 400
+
+    #local_vector_store = await _get_vector_file(user.username)
+    #local_docs = local_vector_store.similarity_search(question, k=3)
+    #print(local_docs)
+    #local_retrieved_chunks = local_docs[0].page_content + local_docs[1].page_content + local_docs[2].page_content
+
+    vectordb_vector_store = await _get_vector_file("admin")
+    vectordb_docs = vectordb_vector_store.similarity_search(question, k=3)
+    print(vectordb_docs)
+    vectordb_retrieved_chunks = vectordb_docs[0].page_content + vectordb_docs[1].page_content + vectordb_docs[2].page_content
+
+    system_message="Verilen en alakalı eşleşmeli metinlere göre sorunun doğru cevabını bul."
+    context = "Lokal Dosyalardaki en alakalı eşleşmeler: " + "Vektör Veritabanındaki en alakalı eşleşmeler: " + vectordb_retrieved_chunks # + local_retrieved_chunks
+    prompt = system_message + "Soru: " + question + context
     try:
         response = llm.invoke(prompt)
     except Exception:
         return "Wrong API key.", 400
-    answer = response.content + "  **<Most Related Chunk>**  " + retrieved_chunks
+    answer = response.content + " Bulunan en alakalı metin parçaları: " + context
     print(f"[DEBUG] RAG Results: {answer}")
     return answer, 200
-
-
-async def _get_llm(model_name:str):
-    if model_name == "openai":
-        OPENAI_KEY = os.getenv("OPENAI_KEY")
-        llm = OpenAI(api_key=OPENAI_KEY, model="gpt-3.5-turbo-instruct")
-    elif model_name == "azure_openai":
-        AZURE_AD_TOKEN = os.getenv("AZURE_AD_TOKEN")
-        AZURE_AD_TOKEN_PROVIDER = os.getenv("AZURE_AD_TOKEN_PROVIDER")
-        AZURE_DEPLOYMENT = os.getenv("AZURE_DEPLOYMENT")
-        AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-        llm = AzureOpenAI(azure_ad_token=AZURE_AD_TOKEN, azure_ad_token_provider=AZURE_AD_TOKEN_PROVIDER, azure_deployment=AZURE_DEPLOYMENT, azure_endpoint=AZURE_ENDPOINT, model="gpt-3.5-turbo-instruct")
-    elif model_name == "llama3":
-        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        os.environ["GROQ_API_KEY"] = GROQ_API_KEY
-        llm = ChatGroq(api_key=GROQ_API_KEY, model_name="llama3-70b-8192")
-    else:
-        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-        llm = ChatGoogleGenerativeAI(google_api_key=GOOGLE_API_KEY,model="gemini-pro")
-    return llm
 
 
 async def _get_vector_file(username: str)-> any:
     with open(username+".pkl", "rb") as f:
         vector_store = pickle.load(f)
     return vector_store
+
+
+async def _get_llm(model_name:str, api_key: str=None):
+    try:
+        if model_name == "openai":
+            OPENAI_KEY = os.getenv("OPENAI_KEY")
+            llm = OpenAI(api_key=OPENAI_KEY, model="gpt-3.5-turbo-instruct")
+        elif model_name == "azure_openai":
+            AZURE_AD_TOKEN = os.getenv("AZURE_AD_TOKEN")
+            AZURE_AD_TOKEN_PROVIDER = os.getenv("AZURE_AD_TOKEN_PROVIDER")
+            AZURE_DEPLOYMENT = os.getenv("AZURE_DEPLOYMENT")
+            AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
+            llm = AzureOpenAI(azure_ad_token=AZURE_AD_TOKEN, azure_ad_token_provider=AZURE_AD_TOKEN_PROVIDER, azure_deployment=AZURE_DEPLOYMENT, azure_endpoint=AZURE_ENDPOINT, model="gpt-3.5-turbo-instruct")
+        elif model_name == "llama3":
+            GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+            os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+            llm = ChatGroq(api_key=GROQ_API_KEY, model_name="llama3-70b-8192")
+        else:
+            GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+            llm = ChatGoogleGenerativeAI(google_api_key=GOOGLE_API_KEY,model="gemini-pro")
+    except Exception:
+        return None
+    return llm
 
 
 async def _log(user: User, memory:str, question: str, system_message: str, answer: str, final_answer: str) -> None:
