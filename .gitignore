@@ -5,3 +5,6 @@ __pycache__
 log.txt
 volumes/*
 .env
+crew/crew/*
+crew/db/*
+.vscode/*

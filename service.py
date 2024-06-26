@@ -11,7 +11,17 @@ from langchain_openai import OpenAI
 from langchain_openai import AzureOpenAI
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import Milvus
-from pymilvus import Collection,connections
+from langchain_milvus.retrievers import MilvusCollectionHybridSearchRetriever
+from langchain_milvus.utils.sparse import BM25SparseEmbedding
+from pymilvus import (
+    Collection,
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    WeightedRanker,
+    connections,
+)
+from langchain_community.utils.sparse import BM25SparseEmbedding
 import pickle
 from datetime import datetime
 import io
@@ -25,7 +35,6 @@ is_loaded = load_dotenv()
 # Milvus connection parameters
 CONNECTION_URI = os.getenv("CONNECTION_URI")
 connections.connect(uri=CONNECTION_URI)
-
 
 async def upload_vectordb(user: User, files: list[UploadFile]) -> tuple[str, int]:
     text = await _extract_text_from_document(files)
@@ -72,21 +81,51 @@ async def _chunk_text(text: str) -> list[str]:
     return chunks
 
 
-async def _create_embeddings_and_save_vectordb(user: User, chunks: any) -> Collection:
-    embedding_model = HuggingFaceEmbeddings(model_name=user.embedder)
-    pkl_name = os.path.join("admin.pkl")
-    vector_store = Milvus.from_texts(
-        texts=chunks,
-        embedding=embedding_model,
-        metadatas=[{"source": f"{pkl_name}:{i}"} for i in range(len(chunks))],
-        connection_args={
-            "uri": CONNECTION_URI,
-        },
-        drop_old=True,
+async def _create_embeddings_and_save_vectordb(user: User, chunks: any) -> None:
+    pk_field = "doc_id"
+    dense_field = "dense_vector"
+    sparse_field = "sparse_vector"
+    text_field = "text"
+    
+    dense_embedding_func = HuggingFaceEmbeddings(user.embedder)
+    dense_dim = len(dense_embedding_func.embed_query(chunks[1]))
+    
+    fields = [
+        FieldSchema(
+            name=pk_field,
+            dtype=DataType.VARCHAR,
+            is_primary=True,
+            auto_id=True,
+            max_length=100,
+        ),
+        FieldSchema(name=dense_field, dtype=DataType.FLOAT_VECTOR, dim=dense_dim),
+        FieldSchema(name=sparse_field, dtype=DataType.SPARSE_FLOAT_VECTOR),
+        FieldSchema(name=text_field, dtype=DataType.VARCHAR, max_length=65_535),
+    ]
+
+    schema = CollectionSchema(fields=fields, enable_dynamic_field=False)
+    collection = Collection(
+        name="Admin", schema=schema, consistency_level="Strong"
     )
-    with open(pkl_name, "wb") as f:
-        pickle.dump(vector_store, f)
-    return vector_store
+
+    dense_index = {"index_type": "FLAT", "metric_type": "IP"}
+    collection.create_index("dense_vector", dense_index)
+    sparse_index = {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "IP"}
+    collection.create_index("sparse_vector", sparse_index)
+    collection.flush()
+
+    sparse_embedding_func = BM25SparseEmbedding(corpus=chunks)
+    
+    entities = []
+    for chunk in chunks:
+        entity = {
+            dense_field: dense_embedding_func.embed_documents([chunk])[0],
+            sparse_field: sparse_embedding_func.embed_documents([chunk])[0],
+            text_field: chunk,
+        }
+        entities.append(entity)
+    collection.insert(entities)
+    collection.load()
 
 
 async def _create_embeddings_and_save_local(user: User, chunks: any) -> FAISS:
@@ -169,18 +208,29 @@ async def _rag(user: User, question: str, api_key:str = None) -> tuple[str, int]
     if llm is None:
         return "API key not found.", 400
 
-    #local_vector_store = await _get_vector_file(user.username)
-    #local_docs = local_vector_store.similarity_search(question, k=3)
-    #print(local_docs)
-    #local_retrieved_chunks = local_docs[0].page_content + local_docs[1].page_content + local_docs[2].page_content
+    local_vector_store = await _get_vector_file(user.username)
+    local_docs = local_vector_store.similarity_search(question, k=3)
+    print(local_docs)
+    local_retrieved_chunks = local_docs[0].page_content + local_docs[1].page_content + local_docs[2].page_content
 
-    vectordb_vector_store = await _get_vector_file("admin")
-    vectordb_docs = vectordb_vector_store.similarity_search(question, k=3)
-    print(vectordb_docs)
+    sparse_search_params = {"metric_type": "IP"}
+    dense_search_params = {"metric_type": "IP", "params": {}}
+    retriever = MilvusCollectionHybridSearchRetriever(
+        collection=collection,
+        rerank=WeightedRanker(0.5, 0.5),
+        anns_fields=[dense_field, sparse_field],
+        field_embeddings=[dense_embedding_func, sparse_embedding_func],
+        field_search_params=[dense_search_params, sparse_search_params],
+        top_k=3,
+        text_field=text_field,
+    )
+
+    vectordb_docs = retriever.invoke(question, k=3)
+    print(vectordb_retrieved_chunks)
     vectordb_retrieved_chunks = vectordb_docs[0].page_content + vectordb_docs[1].page_content + vectordb_docs[2].page_content
 
     system_message="Verilen en alakalı eşleşmeli metinlere göre sorunun doğru cevabını bul."
-    context = "Lokal Dosyalardaki en alakalı eşleşmeler: " + "Vektör Veritabanındaki en alakalı eşleşmeler: " + vectordb_retrieved_chunks # + local_retrieved_chunks
+    context = "Lokal Dosyalardaki en alakalı eşleşmeler: " + local_retrieved_chunks + "Vektör Veritabanındaki en alakalı eşleşmeler: " + vectordb_retrieved_chunks
     prompt = system_message + "Soru: " + question + context
     try:
         response = llm.invoke(prompt)
