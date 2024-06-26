@@ -4,9 +4,6 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from crewai_tools import BaseTool, DOCXSearchTool
 from langchain_huggingface import HuggingFaceEmbeddings
-#from langchain_community.vectorstores import LanceDB
-#from langchain_text_splitters import RecursiveCharacterTextSplitter
-#import lancedb
 
 is_loaded = load_dotenv(".env")
 
@@ -15,80 +12,17 @@ EMBEDDING = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
 
 VECTOR_STORE = None
 
-"""
-# TODO fix tool
-class GetNews:
-    @tool("Get Precedent Decisions")
-    def get_precedent_decision(self, query: str) -> str:
-        'Search LanceDB for relevant legal cases, their decisions and laws based on a query.'
-        if VECTOR_STORE:
-            retriever = VECTOR_STORE.similarity_search(query)
-            return retriever
-        else:
-            return "No vector store found."
-
-class SentimentAnalysisTool(BaseTool):
-    name: str ="Sentiment Analysis Tool"
-    description: str = ("Analyzes the sentiment of text "
-         "to ensure positive and engaging communication.")
-    
-    def _run(self, text: str) -> str:
-        # Your custom code tool goes here
-        return "positive"
-        
-
-def _lance_db_connection(dataset):
-    db = lancedb.connect("/tmp/lancedb")
-    table = db.create_table("tb", data=dataset, mode="overwrite")
-    return table
-
-
-def _read_files_in_directory(path):
-    file_contents = {}
-    
-    for root, _, files in os.walk(path):
-        for file in files:
-            file_path = os.path.join(root, file)
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    file_contents[file] = f.read()
-            except Exception as e:
-                print(f"Error reading {file_path}: {e}")
-    
-    return file_contents
-
-def _save_vector_db(document_paths):
-    global VECTOR_STORE
-    emb = EMBEDDING.embed_query("hello_world")
-    dataset = [{"vector": emb, "text": "dummy_text"}]
-    table = _lance_db_connection(dataset)
-    
-    all_splits = []
-    for file_name, content in document_paths.items():
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        splits = text_splitter.split_text(content)
-        all_splits.append(splits)
-
-    # Index the accumulated content splits if there are any
-    if all_splits:
-        VECTOR_STORE = LanceDB.from_texts(splits, embedding=EMBEDDING, connection=table)
-        return "Documents are saved to the vector database."
-    else:
-        return "No content available for processing."
-"""
-
-
-
 
 def _get_llm() ->ChatGroq:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    llm = ChatGroq(api_key=GROQ_API_KEY, model="llama3-70b-8192", max_tokens=6000)
+    llm = ChatGroq(api_key=GROQ_API_KEY, temperature=0.1, model="llama3-8b-8192", max_tokens=6000)
     return llm
 
 def _get_agents(llm:ChatGroq)-> tuple:
     worker_agent = Agent(
         role="Kıdemli ve Deneyimli Türkiye'deki Kişisel Verilerin Korunması Kanunun (KVKK) Uzmanı Hukuk Danışmanı",
         goal="Teknik, anlaşılır ve yardımsever ol "
+            "İngilizce yerine Türkçe cevap ver"
             "Takımdaki hukuk danışmanısın",
         backstory=(
                 "Hukuk danışmanlık bürosunda çalışıyorsun"
@@ -103,7 +37,8 @@ def _get_agents(llm:ChatGroq)-> tuple:
 
     quality_agent = Agent(
         role="Kişisel Verilerin Korunması Kanunun (KVKK) Uzmanı Hukuk Danışmanını Destekleyen Kalite Güvence Uzmanısın",
-        goal="Ekibinizde en iyi destek kalite güvencesini sağla",
+        goal="Ekibinizde en iyi destek kalite güvencesini sağla"
+            "İngilizce yerine Türkçe cevap ver",
         backstory=(
              "Hukuk danışmanlık bürosunda çalışıyorsun"
              "Şu anda ekibinizle birlikte {customer} tarafından gelen bir talep üzerinde çalışıyorsunuz."
@@ -132,6 +67,7 @@ def _get_tasks(tools, worker_agent, quality_agent):
             "Soruların tüm yönlerini ele al."
             "Yanıtta, cevabı bulmak için kullandığınız her şeyi, dış veriler veya çözümler de dahil olmak üzere, referanslarla birlikte belirt."
             "Cevabın eksiksiz olmasını sağla, hiçbir sorunun yanıtsız kalmamasına dikkat et ve yanıt boyunca yardımsever ve dostane tonunu koru."
+            "DOCXSearchTool aracını kullanacaksan search positional argümanını 'search_query' ile değiştir."
         ),
         tools=tools,
         agent=worker_agent,
@@ -169,19 +105,13 @@ def _get_crew(agent_list, task_list):
         },
         verbose=2,
         memory=True,
-        max_rpm=100
+        max_rpm=10
     )
     return crew
 
 
 
 if __name__ == "__main__":
-
-    """
-    directory_path = 'C:/Repos/saol/crew/folders'
-    documents = _read_files_in_directory(directory_path)
-    _save_vector_db(documents)   
-    """
  
     tools = []
     rag_tool = DOCXSearchTool(
