@@ -2,7 +2,7 @@ from crewai import Agent, Task, Crew, Process
 import os
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from crewai_tools import BaseTool, DOCXSearchTool
+from crewai_tools import DOCXSearchTool
 from langchain_huggingface import HuggingFaceEmbeddings
 
 is_loaded = load_dotenv(".env")
@@ -15,20 +15,20 @@ VECTOR_STORE = None
 
 def _get_llm() ->ChatGroq:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    llm = ChatGroq(api_key=GROQ_API_KEY, temperature=0.1, model="llama3-8b-8192", max_tokens=6000)
+    llm = ChatGroq(api_key=GROQ_API_KEY, temperature=0.05, model="llama3-70b-8192", max_tokens=6000)
     return llm
 
 def _get_agents(llm:ChatGroq)-> tuple:
     worker_agent = Agent(
-        role="Kıdemli ve Deneyimli Türkiye'deki Kişisel Verilerin Korunması Kanunun (KVKK) Uzmanı Hukuk Danışmanı",
-        goal="Teknik, anlaşılır ve yardımsever ol "
-            "İngilizce yerine Türkçe cevap ver"
-            "Takımdaki hukuk danışmanısın",
+        role="Senior and Experienced Legal Consultant, Expert on the Personal Data Protection Law (KVKK) in Turkey",
+        goal="Be technical, clear and helpful "
+            "Answer only in Turkish"
+            "You are the legal advisor on the team",
         backstory=(
-                "Hukuk danışmanlık bürosunda çalışıyorsun"
-                "Şirketiniz için çok önemli bir müşteri olan {customer} adlı müşteriye destek sağlamak için çalışıyorsun."
-                "En iyi desteği sağladığınızdan emin olmalısın!"
-                "Tam ve eksiksiz cevaplar verdiğinizden emin ol ve varsayımlarda bulunma."
+                "You work in a legal consultancy firm"
+                "You are working to provide support to {customer}, a very important customer for your company."
+                "You need to make sure you provide the best support!"
+                "Make sure you give full and complete answers and don't make assumptions."
         ),
         llm=llm,
         allow_delegation=False, 
@@ -36,14 +36,14 @@ def _get_agents(llm:ChatGroq)-> tuple:
     )
 
     quality_agent = Agent(
-        role="Kişisel Verilerin Korunması Kanunun (KVKK) Uzmanı Hukuk Danışmanını Destekleyen Kalite Güvence Uzmanısın",
-        goal="Ekibinizde en iyi destek kalite güvencesini sağla"
-            "İngilizce yerine Türkçe cevap ver",
+        role="You are a Quality Assurance Specialist Supporting the Personal Data Protection Law (KVKK) Expert Legal Consultant",
+        goal="Check the quality and correctness of the answers of the legal consultant"
+            "Answer only in Turkish",
         backstory=(
-             "Hukuk danışmanlık bürosunda çalışıyorsun"
-             "Şu anda ekibinizle birlikte {customer} tarafından gelen bir talep üzerinde çalışıyorsunuz."
-             "Hukuk Danışmanı'nın mümkün olan en iyi desteği sağladığından emin olmalısın."
-             "Hukuk Danışmanı'nın tam ve eksiksiz cevaplar verdiğinden ve varsayımlarda bulunmadığından emin olman gerekiyor."
+             "You work in a legal consultancy firm"
+             "You are currently working with your team on a request from {customer}."
+             "You should ensure that Legal Counsel provides the best possible support."
+             "You need to ensure that your Legal Counsel provides full and complete answers and does not make assumptions."
         ),
         llm=llm,
         allow_delegation=True,
@@ -56,18 +56,19 @@ def _get_tasks(tools, worker_agent, quality_agent):
     task_list = []
     inquiry_resolution = Task(
         description=(
-            "{customer} çok önemli bir taleple iletişime geçti:\n"
+            "{customer} contacted us with a very important request:\n"
             "{inquiry}\n\n"
-            "{person}, {customer} adına iletişime geçen kişidir."
-            "En iyi desteği sağlamak için bildiğiniz her şeyi kullanmalısınız."
-            "Müşterinin talebine eksiksiz ve doğru bir yanıt vermek için çaba göstermelisiniz."
+            "{person} is the person who contacts on behalf of {customer}."
+            "You should use everything you know to provide the best support."
+            "You must strive to provide a complete and accurate Turkish response to the customer's request."
+            "You do not have to use a tool. If you decide on using a tool is appropriate and this tool is DOCX Search Tool replace the search positional argument with 'search_query'. "
+            "Do not use the same tool again and again multiple times with the same input."
         ),
         expected_output=(
-            "Müşterinin sorusuna ayrıntılı ve bilgilendirici bir yanıt ver."
-            "Soruların tüm yönlerini ele al."
-            "Yanıtta, cevabı bulmak için kullandığınız her şeyi, dış veriler veya çözümler de dahil olmak üzere, referanslarla birlikte belirt."
-            "Cevabın eksiksiz olmasını sağla, hiçbir sorunun yanıtsız kalmamasına dikkat et ve yanıt boyunca yardımsever ve dostane tonunu koru."
-            "DOCXSearchTool aracını kullanacaksan search positional argümanını 'search_query' ile değiştir."
+            "Provide a detailed and informative Turkish answer to the customer's question."
+            "Address all aspects of the questions."
+            "In your answer, cite everything you used to find the answer, including any external data or solutions, with references."
+            "Make sure your answer is complete, make sure no questions are left unanswered, and maintain a helpful and friendly tone throughout the answer."
         ),
         tools=tools,
         agent=worker_agent,
@@ -77,17 +78,20 @@ def _get_tasks(tools, worker_agent, quality_agent):
 
     quality_assurance_review = Task(
         description=(
-                    "{customer}'a ait sorgu için Kıdemli Hukuk Danışmanı tarafından hazırlanan yanıtı incele."
-                    "Yanıtın kapsamlı, doğru olduğundan ve müşterinin beklediği yüksek kalite standartlarına uygun olduğundan emin ol.\n"
-                    "Müşterinin sorgusunun tüm bölümlerinin yardımsever ve dostane bir üslupla kapsamlı bir şekilde yanıtlandığını doğrula.\n"
-                    "Bilgiyi bulmak için kullanılan referansları ve kaynakları kontrol et, yanıtın iyi desteklendiğinden ve hiçbir soruyu yanıtsız bırakmadığından emin ol."
+                    "Review the responses prepared by Senior Legal Counsel to {customer}'s query."
+                    "Make sure the response is Turkish, comprehensive, accurate, and meets the high quality standards the customer expects.\n"
+                    "Verify that all parts of the customer's inquiry are answered thoroughly in a helpful and friendly tone.\n"
+                    "Check the references and sources used to find the information, making sure the answer is well supported and doesn't leave any questions unanswered."
+                    "If answer meets all the requirements say this is ready we can finish the work and exit."
         ),
         expected_output=(
-                    "Müşteriye gönderilmeye hazır nihai, ayrıntılı ve bilgilendirici bir yanıt.\nBu yanıt, ilgili tüm geri bildirimleri ve iyileştirmeleri içerecek şekilde müşterinin sorgusunu tam olarak ele almalıdır.\nFazla resmi olmayın, soğukkanlı ve soğukkanlı bir şirketiz ancak baştan sona profesyonel ve samimi bir üslup."
+                    "A final, detailed and informative response ready to be sent to the customer.\n"
+                    "This response should fully address the customer's query, including all relevant feedback and improvements.\n"
+                    "Have a professional and friendly tone throughout."
         ),
         agent=quality_agent,
     )
-    
+
     task_list.append(quality_assurance_review)
 
     return task_list
@@ -103,9 +107,9 @@ def _get_crew(agent_list, task_list):
                 "model": EMBEDDING_MODEL_NAME
             }
         },
-        verbose=2,
+        verbose=1,
         memory=True,
-        max_rpm=10
+        max_rpm=30
     )
     return crew
 
