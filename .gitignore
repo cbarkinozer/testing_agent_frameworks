@@ -8,3 +8,5 @@ volumes/*
 crew/crew/*
 crew/db/*
 .vscode/*
+autogen/.cache
+autogen_venv
